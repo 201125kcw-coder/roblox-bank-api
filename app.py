@@ -1,9 +1,9 @@
 from flask import Flask, request, jsonify
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 
 import psycopg2
-import psycopg2.extras
+from psycopg2.extras import RealDictCursor
 
 
 app = Flask(__name__)
@@ -38,7 +38,7 @@ def get_db_connection():
 
     connection = psycopg2.connect(
         DATABASE_URL,
-        sslmode="require"
+        cursor_factory=RealDictCursor
     )
 
 
@@ -52,6 +52,8 @@ def get_db_connection():
 def initialize_database():
 
     connection = None
+    cursor = None
+
 
     try:
 
@@ -67,7 +69,6 @@ def initialize_database():
         cursor.execute(
 
             """
-
             CREATE TABLE IF NOT EXISTS users (
 
                 roblox_user_id TEXT PRIMARY KEY,
@@ -76,14 +77,11 @@ def initialize_database():
 
                 account_balance BIGINT NOT NULL DEFAULT 0,
 
-                created_at TIMESTAMP WITH TIME ZONE
-                DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-                updated_at TIMESTAMP WITH TIME ZONE
-                DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 
             )
-
             """
 
         )
@@ -96,10 +94,9 @@ def initialize_database():
         cursor.execute(
 
             """
-
             CREATE TABLE IF NOT EXISTS transactions (
 
-                id BIGSERIAL PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
 
                 roblox_user_id TEXT NOT NULL,
 
@@ -107,32 +104,30 @@ def initialize_database():
 
                 amount BIGINT NOT NULL,
 
-                message TEXT NOT NULL,
+                message TEXT,
 
-                created_at TIMESTAMP WITH TIME ZONE
-                DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 
             )
-
             """
 
         )
 
 
-        # 거래내역 검색 속도 향상
+        # ==================================
+        # 거래내역 조회 속도 개선
+        # ==================================
 
         cursor.execute(
 
             """
-
             CREATE INDEX IF NOT EXISTS
             idx_transactions_user_id
 
-            ON transactions (
-                roblox_user_id,
-                created_at DESC
+            ON transactions
+            (
+                roblox_user_id
             )
-
             """
 
         )
@@ -158,25 +153,14 @@ def initialize_database():
 
     finally:
 
+        if cursor:
+
+            cursor.close()
+
+
         if connection:
 
             connection.close()
-
-
-# ==========================================
-# API 키 확인
-# ==========================================
-
-def check_api_key(data):
-
-    if not data:
-
-        return False
-
-
-    return data.get(
-        "api_key"
-    ) == API_KEY
 
 
 # ==========================================
@@ -184,44 +168,70 @@ def check_api_key(data):
 # ==========================================
 
 def ensure_user(
-    cursor,
-    user_id
+    roblox_user_id
 ):
 
-    user_id = str(
-        user_id
+    roblox_user_id = str(
+        roblox_user_id
     )
 
 
-    cursor.execute(
+    connection = None
+    cursor = None
 
-        """
 
-        INSERT INTO users (
+    try:
 
-            roblox_user_id
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute(
+
+            """
+            INSERT INTO users
+            (
+                roblox_user_id,
+                balance,
+                account_balance
+            )
+
+            VALUES
+            (
+                %s,
+                0,
+                0
+            )
+
+            ON CONFLICT
+            (
+                roblox_user_id
+            )
+
+            DO NOTHING
+            """,
+
+            (
+                roblox_user_id,
+            )
 
         )
 
-        VALUES (
 
-            %s
+        connection.commit()
 
-        )
 
-        ON CONFLICT (
-            roblox_user_id
-        )
+    finally:
 
-        DO NOTHING
+        if cursor:
 
-        """,
+            cursor.close()
 
-        (
-            user_id,
-        )
 
-    )
+        if connection:
+
+            connection.close()
 
 
 # ==========================================
@@ -229,137 +239,181 @@ def ensure_user(
 # ==========================================
 
 def get_user_balance(
-    cursor,
-    user_id
+    roblox_user_id
 ):
 
-    user_id = str(
-        user_id
+    roblox_user_id = str(
+        roblox_user_id
     )
 
 
     ensure_user(
-        cursor,
-        user_id
+        roblox_user_id
     )
 
 
-    cursor.execute(
+    connection = None
+    cursor = None
 
-        """
 
-        SELECT
+    try:
 
-            balance,
+        connection = get_db_connection()
 
-            account_balance
+        cursor = connection.cursor()
 
-        FROM users
 
-        WHERE roblox_user_id = %s
+        cursor.execute(
 
-        """,
+            """
+            SELECT
 
-        (
-            user_id,
+                balance,
+
+                account_balance
+
+            FROM users
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
         )
 
-    )
+
+        user = cursor.fetchone()
 
 
-    result = cursor.fetchone()
+        if not user:
 
+            return {
 
-    if not result:
+                "balance": 0,
+
+                "account_balance": 0
+
+            }
+
 
         return {
 
-            "balance": 0,
+            "balance":
+            int(
+                user["balance"]
+            ),
 
-            "account_balance": 0
+            "account_balance":
+            int(
+                user["account_balance"]
+            )
 
         }
 
 
-    return {
+    finally:
 
-        "balance":
-        int(result[0]),
+        if cursor:
 
-        "account_balance":
-        int(result[1])
+            cursor.close()
 
-    }
+
+        if connection:
+
+            connection.close()
 
 
 # ==========================================
-# 거래내역 저장
+# 거래내역 추가
 # ==========================================
 
 def add_transaction(
-
-    cursor,
-
-    user_id,
-
+    roblox_user_id,
     transaction_type,
-
     amount,
-
     message
-
 ):
 
-    cursor.execute(
-
-        """
-
-        INSERT INTO transactions (
-
-            roblox_user_id,
-
-            transaction_type,
-
-            amount,
-
-            message
-
-        )
-
-        VALUES (
-
-            %s,
-
-            %s,
-
-            %s,
-
-            %s
-
-        )
-
-        """,
-
-        (
-
-            str(user_id),
-
-            str(transaction_type),
-
-            int(amount),
-
-            str(message)
-
-        )
-
+    roblox_user_id = str(
+        roblox_user_id
     )
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute(
+
+            """
+            INSERT INTO transactions
+
+            (
+                roblox_user_id,
+
+                transaction_type,
+
+                amount,
+
+                message
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+
+            (
+
+                roblox_user_id,
+
+                transaction_type,
+
+                int(amount),
+
+                message
+
+            )
+
+        )
+
+
+        connection.commit()
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
 
 
 # ==========================================
 # 기본 페이지
 # ==========================================
 
-@app.route("/")
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def home():
 
     return jsonify({
@@ -371,30 +425,24 @@ def home():
         "Roblox Bank API",
 
         "database":
-        "PostgreSQL"
+        "PostgreSQL Connected"
 
     })
 
 
 # ==========================================
-# Discord 봇 → 잔액 업데이트
+# Discord / 외부 서버
+# 잔액 업데이트
 # ==========================================
 
 @app.route(
-
     "/update_balance",
-
     methods=["POST"]
-
 )
 def update_balance():
 
     data = request.get_json()
 
-
-    # ==============================
-    # 데이터 확인
-    # ==============================
 
     if not data:
 
@@ -408,11 +456,13 @@ def update_balance():
         }), 400
 
 
-    # ==============================
+    # ======================================
     # API 키 확인
-    # ==============================
+    # ======================================
 
-    if not check_api_key(data):
+    if data.get(
+        "api_key"
+    ) != API_KEY:
 
         return jsonify({
 
@@ -424,9 +474,9 @@ def update_balance():
         }), 403
 
 
-    # ==============================
-    # Roblox User ID
-    # ==============================
+    # ======================================
+    # Roblox ID 확인
+    # ======================================
 
     roblox_user_id = data.get(
         "roblox_user_id"
@@ -450,24 +500,31 @@ def update_balance():
     )
 
 
-    # ==============================
-    # 잔액 데이터
-    # ==============================
+    # ======================================
+    # 유저 생성
+    # ======================================
+
+    ensure_user(
+        roblox_user_id
+    )
+
+
+    # ======================================
+    # 값 가져오기
+    # ======================================
 
     balance = data.get(
         "balance"
     )
+
 
     account_balance = data.get(
         "account_balance"
     )
 
 
-    # ==============================
-    # 데이터베이스 연결
-    # ==============================
-
     connection = None
+    cursor = None
 
 
     try:
@@ -477,37 +534,15 @@ def update_balance():
         cursor = connection.cursor()
 
 
-        ensure_user(
-
-            cursor,
-
-            roblox_user_id
-
-        )
-
-
-        # ==========================
+        # ==================================
         # 현금 업데이트
-        # ==========================
+        # ==================================
 
         if balance is not None:
-
-            balance = int(
-                balance
-            )
-
-
-            if balance < 0:
-
-                raise ValueError(
-                    "현금은 음수가 될 수 없습니다."
-                )
-
 
             cursor.execute(
 
                 """
-
                 UPDATE users
 
                 SET
@@ -517,14 +552,12 @@ def update_balance():
                     updated_at =
                     CURRENT_TIMESTAMP
 
-                WHERE
-                    roblox_user_id = %s
-
+                WHERE roblox_user_id = %s
                 """,
 
                 (
 
-                    balance,
+                    int(balance),
 
                     roblox_user_id
 
@@ -533,28 +566,15 @@ def update_balance():
             )
 
 
-        # ==========================
+        # ==================================
         # 계좌 업데이트
-        # ==========================
+        # ==================================
 
         if account_balance is not None:
-
-            account_balance = int(
-                account_balance
-            )
-
-
-            if account_balance < 0:
-
-                raise ValueError(
-                    "계좌 잔액은 음수가 될 수 없습니다."
-                )
-
 
             cursor.execute(
 
                 """
-
                 UPDATE users
 
                 SET
@@ -564,14 +584,12 @@ def update_balance():
                     updated_at =
                     CURRENT_TIMESTAMP
 
-                WHERE
-                    roblox_user_id = %s
-
+                WHERE roblox_user_id = %s
                 """,
 
                 (
 
-                    account_balance,
+                    int(account_balance),
 
                     roblox_user_id
 
@@ -580,59 +598,53 @@ def update_balance():
             )
 
 
-        # ==========================
-        # 변경사항 저장
-        # ==========================
-
         connection.commit()
 
 
-        # 최신 잔액 조회
+        # 최신 잔액 가져오기
 
-        user_data = get_user_balance(
+        cursor.execute(
 
-            cursor,
+            """
+            SELECT
 
-            roblox_user_id
+                balance,
+
+                account_balance
+
+            FROM users
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
 
         )
 
 
+        user = cursor.fetchone()
+
+
         return jsonify({
 
-            "success":
-            True,
+            "success": True,
 
             "roblox_user_id":
             roblox_user_id,
 
             "balance":
-            user_data["balance"],
+            int(
+                user["balance"]
+            ),
 
             "account_balance":
-            user_data[
-                "account_balance"
-            ]
+            int(
+                user["account_balance"]
+            )
 
         })
-
-
-    except ValueError as error:
-
-        if connection:
-
-            connection.rollback()
-
-
-        return jsonify({
-
-            "success":
-            False,
-
-            "error":
-            str(error)
-
-        }), 400
 
 
     except Exception as error:
@@ -642,27 +654,22 @@ def update_balance():
             connection.rollback()
 
 
-        print(
-
-            "[Bank API] update_balance 오류:",
-
-            error
-
-        )
-
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
-            "데이터베이스 오류가 발생했습니다."
+            str(error)
 
         }), 500
 
 
     finally:
+
+        if cursor:
+
+            cursor.close()
+
 
         if connection:
 
@@ -674,93 +681,34 @@ def update_balance():
 # ==========================================
 
 @app.route(
-
     "/balance/<roblox_user_id>",
-
     methods=["GET"]
-
 )
 def get_balance(
     roblox_user_id
 ):
 
-    connection = None
+    user = get_user_balance(
+        roblox_user_id
+    )
 
 
-    try:
+    return jsonify({
 
-        connection = get_db_connection()
+        "success": True,
 
-        cursor = connection.cursor()
-
-
-        user_data = get_user_balance(
-
-            cursor,
-
+        "roblox_user_id":
+        str(
             roblox_user_id
+        ),
 
-        )
+        "balance":
+        user["balance"],
 
+        "account_balance":
+        user["account_balance"]
 
-        connection.commit()
-
-
-        return jsonify({
-
-            "success":
-            True,
-
-            "roblox_user_id":
-            str(
-                roblox_user_id
-            ),
-
-            "balance":
-            user_data[
-                "balance"
-            ],
-
-            "account_balance":
-            user_data[
-                "account_balance"
-            ]
-
-        })
-
-
-    except Exception as error:
-
-        if connection:
-
-            connection.rollback()
-
-
-        print(
-
-            "[Bank API] balance 조회 오류:",
-
-            error
-
-        )
-
-
-        return jsonify({
-
-            "success":
-            False,
-
-            "error":
-            "잔액을 불러오지 못했습니다."
-
-        }), 500
-
-
-    finally:
-
-        if connection:
-
-            connection.close()
+    })
 
 
 # ==========================================
@@ -769,20 +717,13 @@ def get_balance(
 # ==========================================
 
 @app.route(
-
     "/withdraw",
-
     methods=["POST"]
-
 )
 def withdraw():
 
     data = request.get_json()
 
-
-    # ==============================
-    # 데이터 확인
-    # ==============================
 
     if not data:
 
@@ -796,11 +737,11 @@ def withdraw():
         }), 400
 
 
-    # ==============================
     # API 키 확인
-    # ==============================
 
-    if not check_api_key(data):
+    if data.get(
+        "api_key"
+    ) != API_KEY:
 
         return jsonify({
 
@@ -812,42 +753,29 @@ def withdraw():
         }), 403
 
 
-    # ==============================
-    # 데이터 가져오기
-    # ==============================
+    roblox_user_id = data.get(
+        "roblox_user_id"
+    )
 
-    user_id = str(
 
-        data.get(
-            "roblox_user_id"
-        )
-
+    amount = data.get(
+        "amount",
+        0
     )
 
 
     try:
 
         amount = int(
-
-            data.get(
-                "amount",
-                0
-            )
-
+            amount
         )
 
 
     except:
 
-        amount = 0
-
-
-    if amount <= 0:
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "올바른 금액을 입력해주세요."
@@ -855,7 +783,30 @@ def withdraw():
         }), 400
 
 
+    if amount <= 0:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "올바른 금액을 입력해주세요."
+
+        }), 400
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    ensure_user(
+        roblox_user_id
+    )
+
+
     connection = None
+    cursor = None
 
 
     try:
@@ -865,23 +816,11 @@ def withdraw():
         cursor = connection.cursor()
 
 
-        ensure_user(
-
-            cursor,
-
-            user_id
-
-        )
-
-
-        # ==================================
         # 행 잠금
-        # ==================================
 
         cursor.execute(
 
             """
-
             SELECT
 
                 balance,
@@ -893,41 +832,26 @@ def withdraw():
             WHERE roblox_user_id = %s
 
             FOR UPDATE
-
             """,
 
             (
-
-                user_id,
-
+                roblox_user_id,
             )
 
         )
 
 
-        user_data = cursor.fetchone()
+        user = cursor.fetchone()
 
 
-        cash_balance = int(
-            user_data[0]
-        )
-
-        account_balance = int(
-            user_data[1]
-        )
-
-
-        # 계좌 잔액 부족
-
-        if account_balance < amount:
+        if user["account_balance"] < amount:
 
             connection.rollback()
 
 
             return jsonify({
 
-                "success":
-                False,
+                "success": False,
 
                 "error":
                 "계좌 잔액이 부족합니다."
@@ -935,79 +859,78 @@ def withdraw():
             })
 
 
-        # ==============================
-        # 계좌 차감
-        # ==============================
-
-        new_account_balance = (
-
-            account_balance
-            -
-            amount
-
-        )
-
-
-        # ==============================
+        # 계좌 감소
         # 현금 증가
-        # ==============================
-
-        new_cash_balance = (
-
-            cash_balance
-            +
-            amount
-
-        )
-
 
         cursor.execute(
 
             """
-
             UPDATE users
 
             SET
 
-                balance = %s,
+                balance =
+                balance + %s,
 
-                account_balance = %s,
+                account_balance =
+                account_balance - %s,
 
                 updated_at =
                 CURRENT_TIMESTAMP
 
             WHERE roblox_user_id = %s
-
             """,
 
             (
 
-                new_cash_balance,
+                amount,
 
-                new_account_balance,
+                amount,
 
-                user_id
+                roblox_user_id
 
             )
 
         )
 
 
-        # ==============================
-        # 거래내역
-        # ==============================
+        # 거래내역 저장
 
-        add_transaction(
+        cursor.execute(
 
-            cursor,
+            """
+            INSERT INTO transactions
 
-            user_id,
+            (
+                roblox_user_id,
 
-            "withdraw",
+                transaction_type,
 
-            amount,
+                amount,
 
-            f"{amount:,}원 출금"
+                message
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+
+            (
+
+                roblox_user_id,
+
+                "withdraw",
+
+                amount,
+
+                f"{amount:,}원 출금"
+
+            )
 
         )
 
@@ -1015,16 +938,43 @@ def withdraw():
         connection.commit()
 
 
+        cursor.execute(
+
+            """
+            SELECT
+
+                balance,
+
+                account_balance
+
+            FROM users
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        updated_user = cursor.fetchone()
+
+
         return jsonify({
 
-            "success":
-            True,
+            "success": True,
 
             "balance":
-            new_cash_balance,
+            int(
+                updated_user["balance"]
+            ),
 
             "account_balance":
-            new_account_balance
+            int(
+                updated_user["account_balance"]
+            )
 
         })
 
@@ -1036,27 +986,22 @@ def withdraw():
             connection.rollback()
 
 
-        print(
-
-            "[Bank API] 출금 오류:",
-
-            error
-
-        )
-
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
-            "출금 처리 중 오류가 발생했습니다."
+            str(error)
 
         }), 500
 
 
     finally:
+
+        if cursor:
+
+            cursor.close()
+
 
         if connection:
 
@@ -1069,11 +1014,8 @@ def withdraw():
 # ==========================================
 
 @app.route(
-
     "/deposit",
-
     methods=["POST"]
-
 )
 def deposit():
 
@@ -1084,8 +1026,7 @@ def deposit():
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "데이터가 없습니다."
@@ -1093,12 +1034,15 @@ def deposit():
         }), 400
 
 
-    if not check_api_key(data):
+    # API 키 확인
+
+    if data.get(
+        "api_key"
+    ) != API_KEY:
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "API 키가 올바르지 않습니다."
@@ -1106,38 +1050,29 @@ def deposit():
         }), 403
 
 
-    user_id = str(
+    roblox_user_id = data.get(
+        "roblox_user_id"
+    )
 
-        data.get(
-            "roblox_user_id"
-        )
 
+    amount = data.get(
+        "amount",
+        0
     )
 
 
     try:
 
         amount = int(
-
-            data.get(
-                "amount",
-                0
-            )
-
+            amount
         )
 
 
     except:
 
-        amount = 0
-
-
-    if amount <= 0:
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "올바른 금액을 입력해주세요."
@@ -1145,7 +1080,30 @@ def deposit():
         }), 400
 
 
+    if amount <= 0:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "올바른 금액을 입력해주세요."
+
+        }), 400
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    ensure_user(
+        roblox_user_id
+    )
+
+
     connection = None
+    cursor = None
 
 
     try:
@@ -1155,23 +1113,11 @@ def deposit():
         cursor = connection.cursor()
 
 
-        ensure_user(
-
-            cursor,
-
-            user_id
-
-        )
-
-
-        # ==================================
-        # 행 잠금
-        # ==================================
+        # 잔액 확인
 
         cursor.execute(
 
             """
-
             SELECT
 
                 balance,
@@ -1183,41 +1129,26 @@ def deposit():
             WHERE roblox_user_id = %s
 
             FOR UPDATE
-
             """,
 
             (
-
-                user_id,
-
+                roblox_user_id,
             )
 
         )
 
 
-        user_data = cursor.fetchone()
+        user = cursor.fetchone()
 
 
-        cash_balance = int(
-            user_data[0]
-        )
-
-        account_balance = int(
-            user_data[1]
-        )
-
-
-        # 현금 부족
-
-        if cash_balance < amount:
+        if user["balance"] < amount:
 
             connection.rollback()
 
 
             return jsonify({
 
-                "success":
-                False,
+                "success": False,
 
                 "error":
                 "보유 현금이 부족합니다."
@@ -1225,50 +1156,35 @@ def deposit():
             })
 
 
-        new_cash_balance = (
-
-            cash_balance
-            -
-            amount
-
-        )
-
-
-        new_account_balance = (
-
-            account_balance
-            +
-            amount
-
-        )
-
+        # 현금 감소
+        # 계좌 증가
 
         cursor.execute(
 
             """
-
             UPDATE users
 
             SET
 
-                balance = %s,
+                balance =
+                balance - %s,
 
-                account_balance = %s,
+                account_balance =
+                account_balance + %s,
 
                 updated_at =
                 CURRENT_TIMESTAMP
 
             WHERE roblox_user_id = %s
-
             """,
 
             (
 
-                new_cash_balance,
+                amount,
 
-                new_account_balance,
+                amount,
 
-                user_id
+                roblox_user_id
 
             )
 
@@ -1277,17 +1193,41 @@ def deposit():
 
         # 거래내역
 
-        add_transaction(
+        cursor.execute(
 
-            cursor,
+            """
+            INSERT INTO transactions
 
-            user_id,
+            (
+                roblox_user_id,
 
-            "deposit",
+                transaction_type,
 
-            amount,
+                amount,
 
-            f"{amount:,}원 입금"
+                message
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+
+            (
+
+                roblox_user_id,
+
+                "deposit",
+
+                amount,
+
+                f"{amount:,}원 입금"
+
+            )
 
         )
 
@@ -1295,16 +1235,43 @@ def deposit():
         connection.commit()
 
 
+        cursor.execute(
+
+            """
+            SELECT
+
+                balance,
+
+                account_balance
+
+            FROM users
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        updated_user = cursor.fetchone()
+
+
         return jsonify({
 
-            "success":
-            True,
+            "success": True,
 
             "balance":
-            new_cash_balance,
+            int(
+                updated_user["balance"]
+            ),
 
             "account_balance":
-            new_account_balance
+            int(
+                updated_user["account_balance"]
+            )
 
         })
 
@@ -1316,27 +1283,22 @@ def deposit():
             connection.rollback()
 
 
-        print(
-
-            "[Bank API] 입금 오류:",
-
-            error
-
-        )
-
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
-            "입금 처리 중 오류가 발생했습니다."
+            str(error)
 
         }), 500
 
 
     finally:
+
+        if cursor:
+
+            cursor.close()
+
 
         if connection:
 
@@ -1349,11 +1311,8 @@ def deposit():
 # ==========================================
 
 @app.route(
-
     "/transfer",
-
     methods=["POST"]
-
 )
 def transfer():
 
@@ -1364,8 +1323,7 @@ def transfer():
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "데이터가 없습니다."
@@ -1373,12 +1331,15 @@ def transfer():
         }), 400
 
 
-    if not check_api_key(data):
+    # API 키 확인
+
+    if data.get(
+        "api_key"
+    ) != API_KEY:
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "API 키가 올바르지 않습니다."
@@ -1386,47 +1347,46 @@ def transfer():
         }), 403
 
 
-    sender_id = str(
-
-        data.get(
-            "sender_id"
-        )
-
+    sender_id = data.get(
+        "sender_id"
     )
 
 
-    receiver_id = str(
-
-        data.get(
-            "receiver_id"
-        )
-
+    receiver_id = data.get(
+        "receiver_id"
     )
+
+
+    amount = data.get(
+        "amount",
+        0
+    )
+
+
+    if sender_id is None or receiver_id is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "송금 대상 정보가 없습니다."
+
+        }), 400
 
 
     try:
 
         amount = int(
-
-            data.get(
-                "amount",
-                0
-            )
-
+            amount
         )
 
 
     except:
 
-        amount = 0
-
-
-    if amount <= 0:
-
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "올바른 금액을 입력해주세요."
@@ -1434,12 +1394,33 @@ def transfer():
         }), 400
 
 
+    if amount <= 0:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "올바른 금액을 입력해주세요."
+
+        }), 400
+
+
+    sender_id = str(
+        sender_id
+    )
+
+
+    receiver_id = str(
+        receiver_id
+    )
+
+
     if sender_id == receiver_id:
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
             "자기 자신에게 송금할 수 없습니다."
@@ -1447,7 +1428,18 @@ def transfer():
         })
 
 
+    ensure_user(
+        sender_id
+    )
+
+
+    ensure_user(
+        receiver_id
+    )
+
+
     connection = None
+    cursor = None
 
 
     try:
@@ -1457,52 +1449,25 @@ def transfer():
         cursor = connection.cursor()
 
 
-        # 두 유저 생성
-
-        ensure_user(
-
-            cursor,
-
-            sender_id
-
-        )
-
-        ensure_user(
-
-            cursor,
-
-            receiver_id
-
-        )
-
-
         # ==================================
-        # 데드락 방지를 위한 정렬
+        # 데드락 방지를 위해
+        # ID 순서대로 잠금
         # ==================================
 
         first_id = min(
-
             sender_id,
-
             receiver_id
-
         )
 
         second_id = max(
-
             sender_id,
-
             receiver_id
-
         )
 
-
-        # 두 유저 행 잠금
 
         cursor.execute(
 
             """
-
             SELECT
 
                 roblox_user_id,
@@ -1513,18 +1478,12 @@ def transfer():
 
             FROM users
 
-            WHERE roblox_user_id IN (
-
-                %s,
-
-                %s
-
-            )
+            WHERE roblox_user_id
+            IN (%s, %s)
 
             ORDER BY roblox_user_id
 
             FOR UPDATE
-
             """,
 
             (
@@ -1538,57 +1497,52 @@ def transfer():
         )
 
 
-        rows = cursor.fetchall()
+        users = cursor.fetchall()
 
 
-        users_data = {}
+        user_map = {
+
+            row[
+                "roblox_user_id"
+            ]: row
+
+            for row in users
+
+        }
 
 
-        for row in rows:
-
-            users_data[
-                str(row[0])
-            ] = {
-
-                "balance":
-                int(row[1]),
-
-                "account_balance":
-                int(row[2])
-
-            }
-
-
-        sender_data = users_data[
+        sender = user_map.get(
             sender_id
-        ]
-
-        receiver_data = users_data[
-            receiver_id
-        ]
+        )
 
 
-        # 송금자 계좌 부족
-
-        if (
-
-            sender_data[
-                "account_balance"
-            ]
-
-            <
-
-            amount
-
-        ):
+        if not sender:
 
             connection.rollback()
 
 
             return jsonify({
 
-                "success":
-                False,
+                "success": False,
+
+                "error":
+                "송금자 정보를 찾을 수 없습니다."
+
+            })
+
+
+        # 계좌 잔액 부족
+
+        if sender[
+            "account_balance"
+        ] < amount:
+
+            connection.rollback()
+
+
+            return jsonify({
+
+                "success": False,
 
                 "error":
                 "계좌 잔액이 부족합니다."
@@ -1596,60 +1550,27 @@ def transfer():
             })
 
 
-        # ==============================
-        # 새로운 잔액
-        # ==============================
-
-        new_sender_account = (
-
-            sender_data[
-                "account_balance"
-            ]
-
-            -
-
-            amount
-
-        )
-
-
-        new_receiver_account = (
-
-            receiver_data[
-                "account_balance"
-            ]
-
-            +
-
-            amount
-
-        )
-
-
-        # ==============================
-        # 송금자 업데이트
-        # ==============================
+        # 송금자 계좌 감소
 
         cursor.execute(
 
             """
-
             UPDATE users
 
             SET
 
-                account_balance = %s,
+                account_balance =
+                account_balance - %s,
 
                 updated_at =
                 CURRENT_TIMESTAMP
 
             WHERE roblox_user_id = %s
-
             """,
 
             (
 
-                new_sender_account,
+                amount,
 
                 sender_id
 
@@ -1658,30 +1579,27 @@ def transfer():
         )
 
 
-        # ==============================
-        # 받는 사람 업데이트
-        # ==============================
+        # 받는 사람 계좌 증가
 
         cursor.execute(
 
             """
-
             UPDATE users
 
             SET
 
-                account_balance = %s,
+                account_balance =
+                account_balance + %s,
 
                 updated_at =
                 CURRENT_TIMESTAMP
 
             WHERE roblox_user_id = %s
-
             """,
 
             (
 
-                new_receiver_account,
+                amount,
 
                 receiver_id
 
@@ -1690,57 +1608,160 @@ def transfer():
         )
 
 
-        # ==============================
-        # 거래내역
-        # ==============================
+        # ==================================
+        # 송금자 거래내역
+        # ==================================
 
-        add_transaction(
+        cursor.execute(
 
-            cursor,
+            """
+            INSERT INTO transactions
 
-            sender_id,
+            (
+                roblox_user_id,
 
-            "transfer_sent",
+                transaction_type,
 
-            amount,
+                amount,
 
-            f"{amount:,}원 송금"
+                message
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+
+            (
+
+                sender_id,
+
+                "transfer_sent",
+
+                amount,
+
+                f"{amount:,}원 송금"
+
+            )
 
         )
 
 
-        add_transaction(
+        # ==================================
+        # 받는 사람 거래내역
+        # ==================================
 
-            cursor,
+        cursor.execute(
 
-            receiver_id,
+            """
+            INSERT INTO transactions
 
-            "transfer_received",
+            (
+                roblox_user_id,
 
-            amount,
+                transaction_type,
 
-            f"{amount:,}원 송금 받음"
+                amount,
+
+                message
+            )
+
+            VALUES
+            (
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            """,
+
+            (
+
+                receiver_id,
+
+                "transfer_received",
+
+                amount,
+
+                f"{amount:,}원 송금 받음"
+
+            )
 
         )
 
-
-        # ==============================
-        # 모든 작업 저장
-        # ==============================
 
         connection.commit()
 
 
+        # ==================================
+        # 최신 잔액 가져오기
+        # ==================================
+
+        cursor.execute(
+
+            """
+            SELECT
+
+                roblox_user_id,
+
+                account_balance
+
+            FROM users
+
+            WHERE roblox_user_id
+            IN (%s, %s)
+            """,
+
+            (
+
+                sender_id,
+
+                receiver_id
+
+            )
+
+        )
+
+
+        updated_users = cursor.fetchall()
+
+
+        updated_map = {
+
+            row[
+                "roblox_user_id"
+            ]: row
+
+            for row in updated_users
+
+        }
+
+
         return jsonify({
 
-            "success":
-            True,
+            "success": True,
 
             "sender_account_balance":
-            new_sender_account,
+            int(
+                updated_map[
+                    sender_id
+                ][
+                    "account_balance"
+                ]
+            ),
 
             "receiver_account_balance":
-            new_receiver_account
+            int(
+                updated_map[
+                    receiver_id
+                ][
+                    "account_balance"
+                ]
+            )
 
         })
 
@@ -1753,26 +1774,27 @@ def transfer():
 
 
         print(
-
             "[Bank API] 송금 오류:",
-
             error
-
         )
 
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
-            "송금 처리 중 오류가 발생했습니다."
+            str(error)
 
         }), 500
 
 
     finally:
+
+        if cursor:
+
+            cursor.close()
+
 
         if connection:
 
@@ -1784,39 +1806,42 @@ def transfer():
 # ==========================================
 
 @app.route(
-
     "/transactions/<roblox_user_id>",
-
     methods=["GET"]
-
 )
 def get_transactions(
     roblox_user_id
 ):
 
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    ensure_user(
+        roblox_user_id
+    )
+
+
     connection = None
+    cursor = None
 
 
     try:
 
         connection = get_db_connection()
 
+        cursor = connection.cursor()
 
-        cursor = connection.cursor(
-            cursor_factory=
-            psycopg2.extras.RealDictCursor
-        )
-
-
-        # 최대 50개
 
         cursor.execute(
 
             """
-
             SELECT
 
-                transaction_type AS type,
+                id,
+
+                transaction_type,
 
                 amount,
 
@@ -1828,18 +1853,13 @@ def get_transactions(
 
             WHERE roblox_user_id = %s
 
-            ORDER BY created_at DESC
+            ORDER BY id DESC
 
             LIMIT 50
-
             """,
 
             (
-
-                str(
-                    roblox_user_id
-                ),
-
+                roblox_user_id,
             )
 
         )
@@ -1853,30 +1873,15 @@ def get_transactions(
 
         for row in rows:
 
-            created_at = row[
-                "created_at"
-            ]
-
-
-            # 시간 문자열 변환
-
-            if created_at:
-
-                time_text = (
-                    created_at.strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                )
-
-            else:
-
-                time_text = ""
-
-
             transaction_list.append({
 
+                "id":
+                row["id"],
+
                 "type":
-                row["type"],
+                row[
+                    "transaction_type"
+                ],
 
                 "amount":
                 int(
@@ -1887,15 +1892,18 @@ def get_transactions(
                 row["message"],
 
                 "time":
-                time_text
+                row[
+                    "created_at"
+                ].strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
 
             })
 
 
         return jsonify({
 
-            "success":
-            True,
+            "success": True,
 
             "transactions":
             transaction_list
@@ -1906,37 +1914,31 @@ def get_transactions(
     except Exception as error:
 
         print(
-
             "[Bank API] 거래내역 조회 오류:",
-
             error
-
         )
 
 
         return jsonify({
 
-            "success":
-            False,
+            "success": False,
 
             "error":
-            "거래내역을 불러오지 못했습니다."
+            str(error)
 
         }), 500
 
 
     finally:
 
+        if cursor:
+
+            cursor.close()
+
+
         if connection:
 
             connection.close()
-
-
-# ==========================================
-# 서버 시작 시 DB 초기화
-# ==========================================
-
-initialize_database()
 
 
 # ==========================================
@@ -1945,14 +1947,16 @@ initialize_database()
 
 if __name__ == "__main__":
 
+    # 데이터베이스 테이블 생성
+
+    initialize_database()
+
+
     port = int(
 
         os.getenv(
-
             "PORT",
-
             5000
-
         )
 
     )

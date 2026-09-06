@@ -92,6 +92,25 @@ def initialize_database():
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS server_status (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                mode TEXT NOT NULL DEFAULT 'CLOSED',
+                priority_rank INTEGER,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO server_status (id, mode, priority_rank)
+            VALUES (1, 'CLOSED', NULL)
+            ON CONFLICT (id) DO NOTHING
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS verification_codes (
                 id BIGSERIAL PRIMARY KEY,
                 verification_code TEXT UNIQUE NOT NULL,
@@ -897,6 +916,116 @@ def get_balance(roblox_user_id):
         "balance": user["balance"],
         "account_balance": user["account_balance"]
     })
+
+
+
+# ==========================================
+# Roblox RP 서버 상태 조회
+# ==========================================
+
+@app.route("/server/status", methods=["GET"])
+def get_server_status():
+    if request.args.get("api_key") != API_KEY:
+        return jsonify({"success": False, "error": "API 키가 올바르지 않습니다."}), 403
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT mode, priority_rank, updated_at FROM server_status WHERE id = 1"
+        )
+        row = cursor.fetchone()
+
+        if not row:
+            return jsonify({
+                "success": True,
+                "mode": "CLOSED",
+                "priority_rank": None
+            })
+
+        return jsonify({
+            "success": True,
+            "mode": row["mode"],
+            "priority_rank": row["priority_rank"],
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None
+        })
+    except Exception as error:
+        print("[Bank API] 서버 상태 조회 오류:", error)
+        return jsonify({"success": False, "error": str(error)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+# ==========================================
+# Roblox RP 서버 상태 변경
+# ==========================================
+
+@app.route("/server/state", methods=["POST"])
+def set_server_state():
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"success": False, "error": "데이터가 없습니다."}), 400
+
+    if not check_api_key(data):
+        return jsonify({"success": False, "error": "API 키가 올바르지 않습니다."}), 403
+
+    mode = str(data.get("mode", "")).upper()
+    if mode not in {"OPEN", "PRIORITY", "CLOSED"}:
+        return jsonify({"success": False, "error": "mode는 OPEN, PRIORITY, CLOSED 중 하나여야 합니다."}), 400
+
+    priority_rank = data.get("priority_rank")
+    if mode == "PRIORITY":
+        if priority_rank is None:
+            return jsonify({"success": False, "error": "PRIORITY 상태에서는 priority_rank가 필요합니다."}), 400
+        try:
+            priority_rank = int(priority_rank)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "priority_rank는 숫자여야 합니다."}), 400
+        if not 0 <= priority_rank <= 255:
+            return jsonify({"success": False, "error": "priority_rank는 0~255 범위여야 합니다."}), 400
+    else:
+        priority_rank = None
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            INSERT INTO server_status (id, mode, priority_rank, updated_at)
+            VALUES (1, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (id)
+            DO UPDATE SET
+                mode = EXCLUDED.mode,
+                priority_rank = EXCLUDED.priority_rank,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (mode, priority_rank)
+        )
+        connection.commit()
+
+        return jsonify({
+            "success": True,
+            "mode": mode,
+            "priority_rank": priority_rank
+        })
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("[Bank API] 서버 상태 변경 오류:", error)
+        return jsonify({"success": False, "error": str(error)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
 
 
 # ==========================================

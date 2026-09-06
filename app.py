@@ -111,6 +111,29 @@ def initialize_database():
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS server_access_logs (
+                id BIGSERIAL PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                roblox_user_id TEXT NOT NULL,
+                roblox_name TEXT NOT NULL,
+                mode TEXT,
+                required_rank INTEGER,
+                group_rank INTEGER,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_server_access_logs_id
+            ON server_access_logs (id)
+            """
+        )
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS verification_codes (
                 id BIGSERIAL PRIMARY KEY,
                 verification_code TEXT UNIQUE NOT NULL,
@@ -1020,6 +1043,127 @@ def set_server_state():
         if connection:
             connection.rollback()
         print("[Bank API] 서버 상태 변경 오류:", error)
+        return jsonify({"success": False, "error": str(error)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+# ==========================================
+# Roblox RP 서버 입장 로그 저장
+# ==========================================
+
+@app.route("/server/access-log", methods=["POST"])
+def create_server_access_log():
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "error": "데이터가 없습니다."}), 400
+    if not check_api_key(data):
+        return jsonify({"success": False, "error": "API 키가 올바르지 않습니다."}), 403
+
+    event_type = str(data.get("event_type", "UNKNOWN"))[:64]
+    roblox_user_id = str(data.get("roblox_user_id", ""))[:64]
+    roblox_name = str(data.get("roblox_name", ""))[:128]
+    mode = str(data.get("mode", ""))[:32] or None
+    reason = str(data.get("reason", ""))[:500]
+    try:
+        required_rank = int(data["required_rank"]) if data.get("required_rank") is not None else None
+    except (TypeError, ValueError):
+        required_rank = None
+    try:
+        group_rank = int(data["group_rank"]) if data.get("group_rank") is not None else None
+    except (TypeError, ValueError):
+        group_rank = None
+
+    if not roblox_user_id or not roblox_name:
+        return jsonify({"success": False, "error": "roblox_user_id와 roblox_name이 필요합니다."}), 400
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            INSERT INTO server_access_logs(
+                event_type, roblox_user_id, roblox_name, mode,
+                required_rank, group_rank, reason
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id, created_at
+            """,
+            (event_type, roblox_user_id, roblox_name, mode, required_rank, group_rank, reason)
+        )
+        row = cursor.fetchone()
+        connection.commit()
+        return jsonify({
+            "success": True,
+            "id": row["id"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None
+        })
+    except Exception as error:
+        if connection:
+            connection.rollback()
+        print("[Bank API] 서버 입장 로그 저장 오류:", error)
+        return jsonify({"success": False, "error": str(error)}), 500
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+@app.route("/server/access-logs", methods=["GET"])
+def get_server_access_logs():
+    if request.args.get("api_key") != API_KEY:
+        return jsonify({"success": False, "error": "API 키가 올바르지 않습니다."}), 403
+
+    try:
+        since_id = int(request.args.get("since_id", "0"))
+    except ValueError:
+        since_id = 0
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", "100"))))
+    except ValueError:
+        limit = 100
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_db_connection()
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT id, event_type, roblox_user_id, roblox_name, mode,
+                   required_rank, group_rank, reason, created_at
+            FROM server_access_logs
+            WHERE id > %s
+            ORDER BY id ASC
+            LIMIT %s
+            """,
+            (since_id, limit)
+        )
+        rows = cursor.fetchall()
+        return jsonify({
+            "success": True,
+            "logs": [
+                {
+                    "id": row["id"],
+                    "event_type": row["event_type"],
+                    "roblox_user_id": row["roblox_user_id"],
+                    "roblox_name": row["roblox_name"],
+                    "mode": row["mode"],
+                    "required_rank": row["required_rank"],
+                    "group_rank": row["group_rank"],
+                    "reason": row["reason"],
+                    "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                }
+                for row in rows
+            ]
+        })
+    except Exception as error:
+        print("[Bank API] 서버 입장 로그 조회 오류:", error)
         return jsonify({"success": False, "error": str(error)}), 500
     finally:
         if cursor:

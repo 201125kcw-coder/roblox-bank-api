@@ -1,5 +1,7 @@
 from flask import Flask, request, jsonify
 import os
+import secrets
+import string
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -158,6 +160,76 @@ def initialize_database():
         )
 
 
+        # ==================================
+        # 고유번호 연동 테이블
+        # ==================================
+
+        cursor.execute(
+
+            """
+            CREATE TABLE IF NOT EXISTS verification_codes (
+
+                id BIGSERIAL PRIMARY KEY,
+
+                verification_code TEXT
+                UNIQUE
+                NOT NULL,
+
+                roblox_user_id TEXT
+                UNIQUE,
+
+                verified BOOLEAN
+                NOT NULL DEFAULT FALSE,
+
+                created_at TIMESTAMP
+                DEFAULT CURRENT_TIMESTAMP,
+
+                verified_at TIMESTAMP
+
+            )
+            """
+
+        )
+
+
+        # ==================================
+        # 고유번호 검색 인덱스
+        # ==================================
+
+        cursor.execute(
+
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_verification_code
+
+            ON verification_codes
+            (
+                verification_code
+            )
+            """
+
+        )
+
+
+        # ==================================
+        # Roblox UserId 검색 인덱스
+        # ==================================
+
+        cursor.execute(
+
+            """
+            CREATE INDEX IF NOT EXISTS
+            idx_verification_roblox_user_id
+
+            ON verification_codes
+            (
+                roblox_user_id
+            )
+            """
+
+        )
+
+
         connection.commit()
 
 
@@ -279,6 +351,20 @@ def check_api_key(data):
 
 
 # ==========================================
+# GET API 키 확인
+# ==========================================
+
+def check_get_api_key():
+
+    api_key = request.args.get(
+        "api_key"
+    )
+
+
+    return api_key == API_KEY
+
+
+# ==========================================
 # 숫자 확인
 # ==========================================
 
@@ -302,6 +388,30 @@ def parse_amount(value):
 
 
     return amount
+
+
+# ==========================================
+# 고유번호 생성
+# ==========================================
+
+def generate_verification_code():
+
+    characters = (
+        string.ascii_uppercase
+        +
+        string.digits
+    )
+
+
+    return "".join(
+
+        secrets.choice(
+            characters
+        )
+
+        for _ in range(8)
+
+    )
 
 
 # ==========================================
@@ -419,6 +529,961 @@ def home():
         "PostgreSQL Connected"
 
     })
+
+
+# ==========================================
+# ==========================================
+# 고유번호 시스템
+# ==========================================
+# ==========================================
+
+
+# ==========================================
+# 고유번호 생성
+# ==========================================
+
+@app.route(
+    "/verification/generate",
+    methods=["POST"]
+)
+def generate_code():
+
+    data = request.get_json()
+
+
+    if not data:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "데이터가 없습니다."
+
+        }), 400
+
+
+    if not check_api_key(data):
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "API 키가 올바르지 않습니다."
+
+        }), 403
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        verification_code = None
+
+
+        for _ in range(10):
+
+            new_code = (
+                generate_verification_code()
+            )
+
+
+            cursor.execute(
+
+                """
+                SELECT id
+
+                FROM verification_codes
+
+                WHERE verification_code = %s
+                """,
+
+                (
+                    new_code,
+                )
+
+            )
+
+
+            existing = cursor.fetchone()
+
+
+            if not existing:
+
+                verification_code = new_code
+
+                break
+
+
+        if not verification_code:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                "고유번호 생성에 실패했습니다."
+
+            }), 500
+
+
+        cursor.execute(
+
+            """
+            INSERT INTO verification_codes
+
+            (
+                verification_code,
+
+                verified
+            )
+
+            VALUES
+            (
+                %s,
+
+                FALSE
+            )
+            """,
+
+            (
+                verification_code,
+            )
+
+        )
+
+
+        connection.commit()
+
+
+        print(
+
+            "[고유번호] 생성 완료:",
+
+            verification_code
+
+        )
+
+
+        return jsonify({
+
+            "success": True,
+
+            "verification_code":
+            verification_code
+
+        })
+
+
+    except Exception as error:
+
+        if connection:
+
+            connection.rollback()
+
+
+        print(
+
+            "[고유번호] 생성 오류:",
+
+            error
+
+        )
+
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            str(error)
+
+        }), 500
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
+
+
+# ==========================================
+# 고유번호로 Roblox 계정 연동
+# ==========================================
+
+@app.route(
+    "/verification/link",
+    methods=["POST"]
+)
+def link_verification():
+
+    data = request.get_json()
+
+
+    if not data:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "데이터가 없습니다."
+
+        }), 400
+
+
+    if not check_api_key(data):
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "API 키가 올바르지 않습니다."
+
+        }), 403
+
+
+    verification_code = data.get(
+        "verification_code"
+    )
+
+
+    roblox_user_id = data.get(
+        "roblox_user_id"
+    )
+
+
+    if not verification_code:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "고유번호가 없습니다."
+
+        }), 400
+
+
+    if roblox_user_id is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "roblox_user_id가 없습니다."
+
+        }), 400
+
+
+    verification_code = str(
+        verification_code
+    ).strip().upper()
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        # ==================================
+        # 이미 해당 Roblox 계정이
+        # 다른 코드와 연동되어 있는지 확인
+        # ==================================
+
+        cursor.execute(
+
+            """
+            SELECT
+
+                verification_code,
+
+                verified
+
+            FROM verification_codes
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        existing_user = cursor.fetchone()
+
+
+        if existing_user:
+
+            if existing_user["verified"]:
+
+                connection.rollback()
+
+
+                return jsonify({
+
+                    "success": False,
+
+                    "error":
+                    "이미 다른 고유번호와 연동된 Roblox 계정입니다."
+
+                }), 400
+
+
+        # ==================================
+        # 고유번호 확인
+        # ==================================
+
+        cursor.execute(
+
+            """
+            SELECT
+
+                id,
+
+                verification_code,
+
+                roblox_user_id,
+
+                verified
+
+            FROM verification_codes
+
+            WHERE verification_code = %s
+
+            FOR UPDATE
+            """,
+
+            (
+                verification_code,
+            )
+
+        )
+
+
+        code_data = cursor.fetchone()
+
+
+        if not code_data:
+
+            connection.rollback()
+
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                "존재하지 않는 고유번호입니다."
+
+            }), 404
+
+
+        # ==================================
+        # 이미 연동된 코드 확인
+        # ==================================
+
+        if code_data["verified"]:
+
+            connection.rollback()
+
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                "이미 사용된 고유번호입니다."
+
+            }), 400
+
+
+        # ==================================
+        # 연동 처리
+        # ==================================
+
+        cursor.execute(
+
+            """
+            UPDATE verification_codes
+
+            SET
+
+                roblox_user_id = %s,
+
+                verified = TRUE,
+
+                verified_at =
+                CURRENT_TIMESTAMP
+
+            WHERE verification_code = %s
+            """,
+
+            (
+
+                roblox_user_id,
+
+                verification_code
+
+            )
+
+        )
+
+
+        connection.commit()
+
+
+        print(
+
+            "[고유번호] 연동 완료:",
+
+            roblox_user_id,
+
+            verification_code
+
+        )
+
+
+        return jsonify({
+
+            "success": True,
+
+            "verified":
+            True,
+
+            "roblox_user_id":
+            roblox_user_id,
+
+            "verification_code":
+            verification_code
+
+        })
+
+
+    except Exception as error:
+
+        if connection:
+
+            connection.rollback()
+
+
+        print(
+
+            "[고유번호] 연동 오류:",
+
+            error
+
+        )
+
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            str(error)
+
+        }), 500
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
+
+
+# ==========================================
+# Roblox 고유번호 연동 확인
+#
+# GET
+# /verification/123456
+#
+# Roblox 서버에서 사용
+# ==========================================
+
+@app.route(
+    "/verification/<roblox_user_id>",
+    methods=["GET"]
+)
+def check_verification(
+    roblox_user_id
+):
+
+    if not check_get_api_key():
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "API 키가 올바르지 않습니다."
+
+        }), 403
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute(
+
+            """
+            SELECT
+
+                verification_code,
+
+                roblox_user_id,
+
+                verified,
+
+                verified_at
+
+            FROM verification_codes
+
+            WHERE roblox_user_id = %s
+
+            AND verified = TRUE
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        verification_data = (
+            cursor.fetchone()
+        )
+
+
+        # ==================================
+        # 연동되지 않은 경우
+        # ==================================
+
+        if not verification_data:
+
+            return jsonify({
+
+                "success": True,
+
+                "roblox_user_id":
+                roblox_user_id,
+
+                "verified":
+                False
+
+            })
+
+
+        # ==================================
+        # 연동된 경우
+        # ==================================
+
+        return jsonify({
+
+            "success": True,
+
+            "roblox_user_id":
+            roblox_user_id,
+
+            "verified":
+            True
+
+        })
+
+
+    except Exception as error:
+
+        print(
+
+            "[고유번호] 확인 오류:",
+
+            error
+
+        )
+
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            str(error)
+
+        }), 500
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
+
+
+# ==========================================
+# 고유번호 상태 확인
+#
+# POST 방식
+# Discord Bot 등에서 사용 가능
+# ==========================================
+
+@app.route(
+    "/verification/check",
+    methods=["POST"]
+)
+def verification_check():
+
+    data = request.get_json()
+
+
+    if not data:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "데이터가 없습니다."
+
+        }), 400
+
+
+    if not check_api_key(data):
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "API 키가 올바르지 않습니다."
+
+        }), 403
+
+
+    roblox_user_id = data.get(
+        "roblox_user_id"
+    )
+
+
+    if roblox_user_id is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "roblox_user_id가 없습니다."
+
+        }), 400
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute(
+
+            """
+            SELECT
+
+                verification_code,
+
+                verified
+
+            FROM verification_codes
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        verification_data = (
+            cursor.fetchone()
+        )
+
+
+        if not verification_data:
+
+            return jsonify({
+
+                "success": True,
+
+                "roblox_user_id":
+                roblox_user_id,
+
+                "verified":
+                False
+
+            })
+
+
+        return jsonify({
+
+            "success": True,
+
+            "roblox_user_id":
+            roblox_user_id,
+
+            "verified":
+
+            bool(
+
+                verification_data[
+                    "verified"
+                ]
+
+            )
+
+        })
+
+
+    except Exception as error:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            str(error)
+
+        }), 500
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
+
+
+# ==========================================
+# 고유번호 연동 해제
+# ==========================================
+
+@app.route(
+    "/verification/unlink",
+    methods=["POST"]
+)
+def unlink_verification():
+
+    data = request.get_json()
+
+
+    if not data:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "데이터가 없습니다."
+
+        }), 400
+
+
+    if not check_api_key(data):
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "API 키가 올바르지 않습니다."
+
+        }), 403
+
+
+    roblox_user_id = data.get(
+        "roblox_user_id"
+    )
+
+
+    if roblox_user_id is None:
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            "roblox_user_id가 없습니다."
+
+        }), 400
+
+
+    roblox_user_id = str(
+        roblox_user_id
+    )
+
+
+    connection = None
+    cursor = None
+
+
+    try:
+
+        connection = get_db_connection()
+
+        cursor = connection.cursor()
+
+
+        cursor.execute(
+
+            """
+            UPDATE verification_codes
+
+            SET
+
+                roblox_user_id = NULL,
+
+                verified = FALSE,
+
+                verified_at = NULL
+
+            WHERE roblox_user_id = %s
+            """,
+
+            (
+                roblox_user_id,
+            )
+
+        )
+
+
+        affected_rows = (
+            cursor.rowcount
+        )
+
+
+        connection.commit()
+
+
+        if affected_rows == 0:
+
+            return jsonify({
+
+                "success": False,
+
+                "error":
+                "연동 정보를 찾을 수 없습니다."
+
+            }), 404
+
+
+        return jsonify({
+
+            "success": True,
+
+            "roblox_user_id":
+            roblox_user_id,
+
+            "verified":
+            False
+
+        })
+
+
+    except Exception as error:
+
+        if connection:
+
+            connection.rollback()
+
+
+        return jsonify({
+
+            "success": False,
+
+            "error":
+            str(error)
+
+        }), 500
+
+
+    finally:
+
+        if cursor:
+
+            cursor.close()
+
+
+        if connection:
+
+            connection.close()
 
 
 # ==========================================
@@ -709,7 +1774,6 @@ def get_balance(
 
 # ==========================================
 # 운전면허 조회
-# Roblox 게임에서 사용
 # ==========================================
 
 @app.route(
@@ -800,9 +1864,11 @@ def get_driving_license(
             "has_driving_license":
 
             bool(
+
                 license_data[
                     "has_driving_license"
                 ]
+
             )
 
         })
@@ -813,6 +1879,7 @@ def get_driving_license(
         print(
 
             "[Bank API] 운전면허 조회 오류:",
+
             error
 
         )
@@ -2104,21 +3171,25 @@ def transfer():
             "sender_account_balance":
 
             int(
+
                 updated_map[
                     sender_id
                 ][
                     "account_balance"
                 ]
+
             ),
 
             "receiver_account_balance":
 
             int(
+
                 updated_map[
                     receiver_id
                 ][
                     "account_balance"
                 ]
+
             )
 
         })
@@ -2134,6 +3205,7 @@ def transfer():
         print(
 
             "[Bank API] 송금 오류:",
+
             error
 
         )
@@ -2276,6 +3348,7 @@ def get_transactions(
         print(
 
             "[Bank API] 거래내역 조회 오류:",
+
             error
 
         )
